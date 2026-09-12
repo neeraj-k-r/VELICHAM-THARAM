@@ -1,0 +1,89 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isController() {
+      return isAuthenticated() && 
+        (request.auth.token.role == 'CONTROLLER' || 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'CONTROLLER');
+    }
+    
+    function isCommunityPayload() {
+      return request.resource.data.keys().hasOnly([
+        'id', 'name', 'district', 'pincode', 'lat', 'lng', 'status', 'memberCount',
+        'activeReportsCount', 'activeRestoresCount', 'outageThreshold', 'restoreThreshold',
+        'timeWindowMinutes', 'lastOutageVerifiedAt', 'lastRestoredAt'
+      ]);
+    }
+    
+    function isTorchPayload() {
+      return request.resource.data.keys().hasOnly([
+        'id', 'communityId', 'action', 'pattern', 'createdAt', 'createdBy'
+      ]);
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      // Users can create/edit profile but cannot elevate their own role to CONTROLLER
+      allow create: if isOwner(userId) && (!request.resource.data.keys().hasAny(['role']) || request.resource.data.role == 'USER');
+      allow update: if isOwner(userId) && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])) || isController();
+      allow delete: if isController();
+    }
+
+    // Communities Collection
+    match /communities/{communityId} {
+      allow read: if true; // Publicly readable for map and status
+      // Any authenticated user may create/update a community record
+      // (dynamic communities + live consensus status), as long as the payload
+      // contains only the standard community structure.
+      allow create, update: if isAuthenticated() && isCommunityPayload();
+      allow delete: if isController();
+    }
+
+    // Outage Reports Collection
+    match /reports/{reportId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      // Users may retire their own votes (switching POYI <-> VANNU retires the old one)
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow update: if isController();
+    }
+
+    // Outages Collection
+    match /outages/{outageId} {
+      allow read: if true;
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated();
+      allow delete: if isController();
+    }
+
+    // Torch Events Collection (Realtime signal triggers)
+    match /torchEvents/{eventId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && isTorchPayload();
+      allow update, delete: if isController();
+    }
+    
+    // Activities Collection
+    match /activities/{activityId} {
+      allow read: if true;
+      allow create: if isAuthenticated();
+      allow update, delete: if isController();
+    }
+
+    // System collection — realtime torch-signal documents (torchSignal, etc.)
+    match /system/{docId} {
+      allow read, write: if isAuthenticated();
+    }
+  }
+}
